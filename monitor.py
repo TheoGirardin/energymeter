@@ -80,6 +80,9 @@ def fmt_row(label, inst, avg):
 def main():
     prev = (energy(RAPL), energy(DRAM) if HAVE_DRAM else 0.0, time.perf_counter())
     header = "Ctrl+C pour quitter\n"
+    # Clear screen and draw the frame at the absolute top: each redraw jumps
+    # to home position, so the layout never scrolls and history stays put.
+    print("\x1b[2J\x1b[H", end="")
     frame_lines = 0
     total_avg = n_cpu = n_dram = n_gpu = 0.0
     cpu_w = dram_w = gpu_w = 0.0
@@ -104,7 +107,7 @@ def main():
                 n_dram = sum(x[2] for x in hist) / len(hist)
                 n_gpu = sum(x[3] for x in hist) / len(hist)
                 prev = (cp, cd, c)
-            W = 90
+            W = 123
             rows = []
             bar = "├" + "─" * W + "┤"
             top = "┌" + "─" * W + "┐"
@@ -113,35 +116,38 @@ def main():
             def line(txt=""):
                 return "│" + f" {txt}".ljust(W) + "│"
 
-            row = lambda name, inst, avg: line(f"{name:<6}{inst:>15.2f} W {avg:>15.2f} W")
+            row = lambda name, inst, avg: line(f"{name:<6}{inst:>13.2f} W {avg:>13.2f} W  ")
             rows.append(top)
-            rows.append(line("Puissance (W)   instant      " + (f"moyen {WINDOW:.0f} s").rjust(15)))
+            rows.append(line("Watt          instant        moyen 60s      " + "conso/jour   cout/jour     cout/mois      (cout elec)".rjust(37)))
             rows.append(bar)
             rows.append(row("CPU", cpu_w, n_cpu))
             rows.append(row("GPU", gpu_w, n_gpu))
-            rows.append(row("DRAM", dram_w, n_dram) if HAVE_DRAM else line(f"{'DRAM':<6}{'n/a':>15} W {'~2.00':>15} W (estime inclus au total)"))
+            rows.append(row("DRAM", dram_w, n_dram) if HAVE_DRAM else line(f"{'DRAM':<6}{'n/a':>13} W {'~2.00':>13} W (estime inclus au total)"))
             dram_w_eff = dram_w if HAVE_DRAM else 2.0
             n_dram_eff = n_dram if HAVE_DRAM else 2.0
             total_avg = n_cpu + n_dram_eff + n_gpu
-            t_costs = f"= {total_avg * 24 / 1000:4.2f} kWh/j  {total_avg * 24 / 1000 * PRICE:4.2f}€/j{total_avg * 24 / 1000 * PRICE * 30:5.2f}€/mois ({PRICE:.4f}€/kWh)"
-            walls = f"{cpu_w + dram_w_eff + gpu_w:>15.2f} W {n_cpu + n_dram_eff + n_gpu:>15.2f} W  {t_costs}"
+            t_costs = f"=    {total_avg * 24 / 1000:4.2f} kWh/j    {total_avg * 24 / 1000 * PRICE:4.2f} €/j    {total_avg * 24 / 1000 * PRICE * 30:5.2f} €/mois    ({PRICE:.4f}€/kWh)"
+            walls = f"{cpu_w + dram_w_eff + gpu_w:>13.2f} W {n_cpu + n_dram_eff + n_gpu:>13.2f} W  {t_costs}"
             rows.append(bar)
             rows.append(line(f"{'TOTAL':<6}{walls}"))
             wall_est = (total_avg * FAN_LOAD) / CHARGER_EFF + FIXED_W
             kwh_24 = wall_est * 24 / 1000
-            t_costs_mur = f"= {kwh_24:4.2f} kWh/j  {kwh_24 * PRICE:4.2f}€/j{kwh_24 * PRICE * 30:5.2f}€/mois ({PRICE:.4f}€/kWh)"
-            rows.append(line(f"{'TOTAL AU MUR':<33}{'~' + f'{wall_est:4.1f} W':>8}  {t_costs_mur}"))
+            t_costs_mur = f"=    {kwh_24:4.2f} kWh/j    {kwh_24 * PRICE:4.2f} €/j    {kwh_24 * PRICE * 30:5.2f} €/mois    ({PRICE:.4f}€/kWh)"
+            rows.append(line(f"{'TOTAL AU MUR':<29}{'~' + f'{wall_est:4.1f} W':>8}  {t_costs_mur}"))
             rows.append(bar)
-            rows.append(line(f"{'Moyenne par écran':<35} ~20 W =  {20 * 24 / 1000:4.2f} kWh/j  {20 * 24 / 1000 * PRICE:4.2f}€/j"
-                f"{20 * 24 / 1000 * PRICE * 30:5.2f}€/mois ({PRICE:.4f}€/kWh)"))
+            rows.append(line(f"{'Moyenne par écran':<31} ~20 W  =    {20 * 24 / 1000:4.2f} kWh/j    {20 * 24 / 1000 * PRICE:4.2f} €/j"
+                f"    {20 * 24 / 1000 * PRICE * 30:5.2f} €/mois    ({PRICE:.4f}€/kWh)"))
             rows.append(bot)
-            rows.append(line(f"Model au mur : x{FAN_LOAD:.2f} ventilos/{CHARGER_EFF:.2f} PSU +{FIXED_W:.0f} W fixes"))
-
 
             frame = "\n".join(rows)
-            redraw = "".join("\r\x1b[2K\x1b[A" for _ in range(frame_lines))
-            print(redraw + header + frame)
-            frame_lines = len(rows) + 2
+            # jump home, wipe downward, reprint at top
+            redraw = "\x1b[H" + "".join("\x1b[2K\n" for _ in range(len(rows) + 2)) + "\x1b[H"
+            _why = {
+                10.0: "ventilos + chipset VRM/LAN/USB + pertes PSU",
+                15.0: "écran + ventilos + chipset VRM/LAN/USB + pertes alimentation",
+            }.get(FIXED_W)
+            model_line = "Model au mur : x{:.2f} ventilos / {:.2f} PSU + {:.0f}W fixes".format(FAN_LOAD, CHARGER_EFF, FIXED_W) + (f" ({_why})" if _why else "")
+            print(redraw + header + frame + "\n" + model_line)
     except KeyboardInterrupt:
         pass
 
