@@ -42,8 +42,33 @@ def cpu_freq_pct():
         return -1
 
 
-PRICE = 0.18  # EUR per kWh
+PRICE = 0.1674  # EUR per kWh
 WINDOW = 60.0  # rolling window seconds
+
+# Estimation au mur : silicium x FAN_LOAD (ventilos sous charge) / CHARGER_EFF
+# (rendement PSU) + FIXED_W (charges fixes internes). Profils par machine
+# (detecte via /sys/devices/virtual/dmi/id), ajouter une entree pour une
+# nouvelle machine :
+# - MSI MAG H610 Infinite S3 (i5-14400F + RTX 4060 Ti, PSU Bronze 0.87):
+#   fixes internes 10 W (ventilos, chipset, VRM, reseau). Peripheriques
+#   externes hors monitor: Apex 7 ~2.5 W ecran allume, DeathAdder Elite
+#   ~0.5 W, Tonor TC-520 ~1 W, AOC 24G2 144Hz 20 W, Dell 27" HD 20 W.
+# - Legion Y540-15IRH 81SX (i5-9300H + GTX 1660 Ti, adaptateur 0.87):
+#   notebookcheck 14.5 W idle min / 18.5 W avg -> 15 W fixes.
+PROFILES = {
+    "MAG H610 Infinite S3": {"fixed_w": 10.0, "eff": 0.87, "fan": 1.06},
+    "Legion Y540-15IRH": {"fixed_w": 15.0, "eff": 0.87, "fan": 1.06},
+}
+_PROFILE_DEFAULT = {"fixed_w": 15.0, "eff": 0.87, "fan": 1.06}
+
+try:
+    _dmi = open("/sys/devices/virtual/dmi/id/product_name").read().strip()
+except OSError:
+    _dmi = ""
+_profile = next((v for k, v in PROFILES.items() if k in _dmi), _PROFILE_DEFAULT)
+FIXED_W = _profile["fixed_w"]
+CHARGER_EFF = _profile["eff"]
+FAN_LOAD = _profile["fan"]
 prev = None
 hist = []  # (timestamp, cpu_w, dram_w, gpu_w)
 
@@ -54,10 +79,7 @@ def fmt_row(label, inst, avg):
 
 def main():
     prev = (energy(RAPL), energy(DRAM) if HAVE_DRAM else 0.0, time.perf_counter())
-    header = (
-        "Ctrl+C pour quitter. Fenetre moyenne: %.0f s\n" % WINDOW
-        + f" {'':4s}  {'instant':>9s}   {'mean ' + str(int(WINDOW)) + 's':>9s}\n"
-    )
+    header = "Ctrl+C pour quitter\n"
     frame_lines = 0
     total_avg = n_cpu = n_dram = n_gpu = 0.0
     cpu_w = dram_w = gpu_w = 0.0
@@ -82,27 +104,40 @@ def main():
                 n_dram = sum(x[2] for x in hist) / len(hist)
                 n_gpu = sum(x[3] for x in hist) / len(hist)
                 prev = (cp, cd, c)
+            W = 90
             rows = []
-            rows.append(f" CPU   {cpu_w:7.2f} W   {n_cpu:7.2f} W")
-            rows.append(f" DRAM  {dram_w:7.2f} W   {n_dram:7.2f} W")
-            rows.append(f" GPU   {gpu_w:7.2f} W   {n_gpu:7.2f} W")
-            rows.append(
-                f" TOTAL {cpu_w + dram_w + gpu_w:7.2f} W   "
-                f"{n_cpu + n_dram + n_gpu:7.2f} W   [fenetre: {len(hist)} ech.]"
-            )
-            total_avg = n_cpu + n_dram + n_gpu
-            # Estimation au mur : silicium / rendement chargeur + fixes (ecran,
-            # ventilos, chipset, VRM, Wi-Fi...)  - deux charges : une fixe ~10 W,
-            # + variable ~4 W si le CPU charge
-            fixed_w = 10.0
-            charger_eff = 0.87
-            wall_est = (total_avg + 4.0 if cpu_w > 15 else total_avg) / charger_eff + fixed_w
+            bar = "├" + "─" * W + "┤"
+            top = "┌" + "─" * W + "┐"
+            bot = "└" + "─" * W + "┘"
+
+            def line(txt=""):
+                return "│" + f" {txt}".ljust(W) + "│"
+
+            row = lambda name, inst, avg: line(f"{name:<6}{inst:>15.2f} W {avg:>15.2f} W")
+            rows.append(top)
+            rows.append(line("Puissance (W)   instant      " + (f"moyen {WINDOW:.0f} s").rjust(15)))
+            rows.append(bar)
+            rows.append(row("CPU", cpu_w, n_cpu))
+            rows.append(row("GPU", gpu_w, n_gpu))
+            rows.append(row("DRAM", dram_w, n_dram) if HAVE_DRAM else line(f"{'DRAM':<6}{'n/a':>15} W {'~2.00':>15} W (estime inclus au total)"))
+            dram_w_eff = dram_w if HAVE_DRAM else 2.0
+            n_dram_eff = n_dram if HAVE_DRAM else 2.0
+            total_avg = n_cpu + n_dram_eff + n_gpu
+            t_costs = f"= {total_avg * 24 / 1000:4.2f} kWh/j  {total_avg * 24 / 1000 * PRICE:4.2f}€/j{total_avg * 24 / 1000 * PRICE * 30:5.2f}€/mois ({PRICE:.4f}€/kWh)"
+            walls = f"{cpu_w + dram_w_eff + gpu_w:>15.2f} W {n_cpu + n_dram_eff + n_gpu:>15.2f} W  {t_costs}"
+            rows.append(bar)
+            rows.append(line(f"{'TOTAL':<6}{walls}"))
+            wall_est = (total_avg * FAN_LOAD) / CHARGER_EFF + FIXED_W
             kwh_24 = wall_est * 24 / 1000
-            rows.append(
-                f" moyenne 60s: {total_avg:6.2f} W silicium -> ~{wall_est:5.1f} W au mur "
-                f"| {kwh_24 * PRICE:5.2f} EUR/jour   {kwh_24 * PRICE * 30:5.2f} EUR/mois"
-            )
-            # reecrit la meme page : remonte et efface les lignes du frame precedent
+            t_costs_mur = f"= {kwh_24:4.2f} kWh/j  {kwh_24 * PRICE:4.2f}€/j{kwh_24 * PRICE * 30:5.2f}€/mois ({PRICE:.4f}€/kWh)"
+            rows.append(line(f"{'TOTAL AU MUR':<33}{'~' + f'{wall_est:4.1f} W':>8}  {t_costs_mur}"))
+            rows.append(bar)
+            rows.append(line(f"{'Moyenne par écran':<35} ~20 W =  {20 * 24 / 1000:4.2f} kWh/j  {20 * 24 / 1000 * PRICE:4.2f}€/j"
+                f"{20 * 24 / 1000 * PRICE * 30:5.2f}€/mois ({PRICE:.4f}€/kWh)"))
+            rows.append(bot)
+            rows.append(line(f"Model au mur : x{FAN_LOAD:.2f} ventilos/{CHARGER_EFF:.2f} PSU +{FIXED_W:.0f} W fixes"))
+
+
             frame = "\n".join(rows)
             redraw = "".join("\r\x1b[2K\x1b[A" for _ in range(frame_lines))
             print(redraw + header + frame)
