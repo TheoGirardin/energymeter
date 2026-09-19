@@ -12,6 +12,7 @@ except ImportError:
 
 RAPL = "/sys/class/powercap/intel-rapl:0/energy_uj"
 DRAM = "/sys/class/powercap/intel-rapl:0:1/energy_uj"
+HAVE_DRAM = os.path.exists(DRAM)
 
 pynvml.nvmlInit()
 GPU = pynvml.nvmlDeviceGetHandleByIndex(0)
@@ -43,7 +44,7 @@ def cpu_freq_pct():
 
 PRICE = 0.18  # EUR per kWh
 WINDOW = 60.0  # rolling window seconds
-prev = (energy(RAPL), energy(DRAM), time.perf_counter())
+prev = None
 hist = []  # (timestamp, cpu_w, dram_w, gpu_w)
 
 
@@ -52,21 +53,26 @@ def fmt_row(label, inst, avg):
 
 
 def main():
-    prev = (energy(RAPL), energy(DRAM), time.perf_counter())
-    print("Ctrl+C pour quitter. Fenetre moyenne: %.0f s" % WINDOW)
-    print()
-    header = f" {'':4s}  {'instant':>9s}   {'mean ' + str(int(WINDOW)) + 's':>9s}"
-    print(header)
+    prev = (energy(RAPL), energy(DRAM) if HAVE_DRAM else 0.0, time.perf_counter())
+    header = (
+        "Ctrl+C pour quitter. Fenetre moyenne: %.0f s\n" % WINDOW
+        + f" {'':4s}  {'instant':>9s}   {'mean ' + str(int(WINDOW)) + 's':>9s}\n"
+    )
+    frame_lines = 0
+    total_avg = n_cpu = n_dram = n_gpu = 0.0
+    cpu_w = dram_w = gpu_w = 0.0
     try:
         while True:
             time.sleep(1.0)
             now = time.perf_counter()
             p, d, t = prev
-            cp, cd, c = energy(RAPL), energy(DRAM), now
+            cp = energy(RAPL)
+            cd = energy(DRAM) if HAVE_DRAM else cp  # no submodule: reuse cpu
+            c = now
             dt = c - t
             if dt > 0:
                 cpu_w = max(0.0, (cp - p) / dt)
-                dram_w = max(0.0, (cd - d) / dt)
+                dram_w = max(0.0, (cd - d) / dt) if HAVE_DRAM else 0.0
                 gpu_w = gpu_power_w()
                 hist.append((now, cpu_w, dram_w, gpu_w))
                 # drop older entries
@@ -75,27 +81,32 @@ def main():
                 n_cpu = sum(x[1] for x in hist) / len(hist)
                 n_dram = sum(x[2] for x in hist) / len(hist)
                 n_gpu = sum(x[3] for x in hist) / len(hist)
-                row = (
-                    f" CPU   {cpu_w:7.2f} W   {n_cpu:7.2f} W\n"
-                    f" DRAM  {dram_w:7.2f} W   {n_dram:7.2f} W\n"
-                    f" GPU   {gpu_w:7.2f} W   {n_gpu:7.2f} W\n"
-                    f" TOTAL {cpu_w + dram_w + gpu_w:7.2f} W"
-                    f"   {n_cpu + n_dram + n_gpu:7.2f} W   "
-                    f"[fenetre: {len(hist)} ech.]\n"
-                )
-                print(row)
                 prev = (cp, cd, c)
+            rows = []
+            rows.append(f" CPU   {cpu_w:7.2f} W   {n_cpu:7.2f} W")
+            rows.append(f" DRAM  {dram_w:7.2f} W   {n_dram:7.2f} W")
+            rows.append(f" GPU   {gpu_w:7.2f} W   {n_gpu:7.2f} W")
+            rows.append(
+                f" TOTAL {cpu_w + dram_w + gpu_w:7.2f} W   "
+                f"{n_cpu + n_dram + n_gpu:7.2f} W   [fenetre: {len(hist)} ech.]"
+            )
             total_avg = n_cpu + n_dram + n_gpu
             # Estimation au mur : silicium / rendement chargeur + fixes (ecran,
             # ventilos, chipset, VRM, Wi-Fi...)  - deux charges : une fixe ~10 W,
             # + variable ~4 W si le CPU charge
             fixed_w = 10.0
             charger_eff = 0.87
-            cpu_load_w = cpu_w if cpu_w > 15 else 0.0  # +4W seulement si CPU vraiment charge
             wall_est = (total_avg + 4.0 if cpu_w > 15 else total_avg) / charger_eff + fixed_w
             kwh_24 = wall_est * 24 / 1000
-            print(f"  moyenne 60s: {total_avg:6.2f} W silicium -> ~{wall_est:5.1f} W au mur "
-                  f"| {kwh_24 * PRICE:5.2f} EUR/jour   {kwh_24 * PRICE * 30:5.2f} EUR/mois")
+            rows.append(
+                f" moyenne 60s: {total_avg:6.2f} W silicium -> ~{wall_est:5.1f} W au mur "
+                f"| {kwh_24 * PRICE:5.2f} EUR/jour   {kwh_24 * PRICE * 30:5.2f} EUR/mois"
+            )
+            # reecrit la meme page : remonte et efface les lignes du frame precedent
+            frame = "\n".join(rows)
+            redraw = "".join("\r\x1b[2K\x1b[A" for _ in range(frame_lines))
+            print(redraw + header + frame)
+            frame_lines = len(rows) + 2
     except KeyboardInterrupt:
         pass
 
