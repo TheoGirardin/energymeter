@@ -177,4 +177,35 @@ démarrer.
 
 ---
 
-Ce doc est le récit à jour de ce qui a bdé appliqué sur ce PC ce jour.
+
+
+## Comparatif mesuré A/B/C (2026-09-19)
+
+Protocole : 3 min par config, ~56 échantillons de 3 s, terminal ouvert +
+monitor.py en boucle NVML (conditions identiques).
+
+| Config | package RAPL | GPU nvidia-smi | Total silicium visible |
+|---|---|---|---|
+| Hybrid + optimisé (modeset=0, EGL Intel) | 13,1 W (iGPU inclus) | 5,7 W si polling NVML, 0 W suspendu | 14-19 W |
+| Hybrid stock (modeset=1, EGL libre) | 14,2 W | 5,9 W D0 verrouillé | 19,9 W |
+| Discrete (dGPU only, iGPU off) | 4,5 W | 10,0 W (pilote l'écran) | 14,6 W |
+
+Piège de lecture : le package RAPL passe de 13 W à 4,5 W en discrete
+parce que l'iGPU (dans package-0) est désactivé : le coût de l'affichage
+sort du compteur CPU et réapparaît côté GPU (10 W). La facture murale
+réelle est comparable en session active.
+
+Au repos réel (terminal fermé, machine idle) :
+
+- hybrid optimisé : **3,3 W** total (package 3,3 W + GPU suspendu)
+- hybrid stock : ~19 W (5,9 W GPU verrouillé + session)
+- discrete : ~14 W (9-10 W pour afficher un écran idle, GPU insuspendable)
+
+Conclusion : le discrete coûte ~11 W de plus en idle ; le seul mode
+restaurable à faible repos est hybrid + optimisé. Repasser en discrete
+serait une régression énergétique pure.
+
+Pour restaurer : `sudo bash ~/Desktop/restore-gpu-optimized.sh`, puis
+BIOS "Hybrid Mode", puis reboot. La mesure complète repère `dmesg`
+`PlatformRequestHandler` (bug SBIOS) : aucun changement de firmware
+disponible pour ce châssis (BIOS BHCN44WW 01/2022 = dernier).
